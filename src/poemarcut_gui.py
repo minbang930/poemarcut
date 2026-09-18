@@ -176,7 +176,7 @@ def _hotkey_from_qt_key(key: int, modifiers: Qt.KeyboardModifier) -> str | None:
 class HotkeyCaptureLineEdit(QLineEdit):
     """Read-only line edit that records the next physical hotkey pressed."""
 
-    hotkeyCaptured = pyqtSignal(str)
+    hotkeyCaptured = pyqtSignal()
 
     def __init__(self, value: str = "", parent: QWidget | None = None) -> None:
         super().__init__(value, parent)
@@ -196,7 +196,7 @@ class HotkeyCaptureLineEdit(QLineEdit):
         if hotkey is None:
             return
         self.setText(hotkey)
-        self.hotkeyCaptured.emit(hotkey)
+        self.hotkeyCaptured.emit()
         self.selectAll()
 
 
