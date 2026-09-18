@@ -71,3 +71,5 @@ Recommend running with `poetry`, eg `poetry run python poemarcut_gui.py`
 
 ### Building
 Run `poetry run build`.
+
+A Windows build is also available through GitHub Actions. Open the **Actions** tab, choose **Build Windows EXE**, and use **Run workflow**. Successful runs upload an artifact containing `poemarcut.exe`, `poemarcut.zip`, and `SHA256SUMS.txt`.
