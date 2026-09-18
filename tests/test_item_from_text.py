@@ -119,6 +119,12 @@ def test_extract_price_price_only() -> None:
     assert item.note.price == 1
     assert item.note.currency == "exalted"
 
+    item = Item.from_text("메모: ~b/o 1 chaos")
+    assert item.note is not None
+    assert item.note.text == "~b/o 1 chaos"
+    assert item.note.price == 1
+    assert item.note.currency == "chaos"
+
     # not currently supporting fractional prices as in "~b/o 1.5 divine" (a stash tab but not merchant tab feature)
 
     item = Item.from_text("Note: ~b/o 1,000 chaos")  # comma as thousands separator
