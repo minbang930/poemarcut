@@ -47,58 +47,85 @@ _parsed_keys: dict[str, tuple[str, Any]] = {}
 
 
 def _match_char(event_key: Key | KeyCode | None, char: str) -> bool:
-    """Return True if the event_key matches the provided character string.
-
-    Args:
-        event_key (Key | KeyCode | None): The event key from the listener.
-        char (str): Single-character string to compare.
-
-    Returns:
-        bool: True if the event key represents the given character.
-
-    """
+    """Return True if the event_key matches the provided character string."""
     if not isinstance(event_key, KeyCode):
         return False
     if getattr(event_key, "char", None) == char:
         return True
     try:
-        return KeyCode.from_char(char) == event_key
+        if KeyCode.from_char(char) == event_key:
+            return True
     except ValueError:
-        return False
+        pass
+
+    # Ctrl/Alt combinations can change or clear KeyCode.char on Windows.
+    # Fall back to the virtual-key code for ASCII letters and digits.
+    vk = getattr(event_key, "vk", None)
+    if vk is not None and len(char) == 1 and char.isascii() and char.isalnum():
+        return vk == ord(char.upper())
+    return False
 
 
-def binding_matches(event_key: Key | KeyCode | None, binding: tuple[str, Any]) -> bool:
-    """Return True if the event key matches the parsed binding tuple.
+def _modifier_name(key: Key | KeyCode | None) -> str | None:
+    """Return the canonical modifier name for a pynput key."""
+    groups = {
+        "ctrl": ("ctrl", "ctrl_l", "ctrl_r"),
+        "alt": ("alt", "alt_l", "alt_r", "alt_gr"),
+        "shift": ("shift", "shift_l", "shift_r"),
+        "win": ("cmd", "cmd_l", "cmd_r"),
+    }
+    for name, attrs in groups.items():
+        for attr in attrs:
+            candidate = getattr(Key, attr, None)
+            if candidate is not None and key == candidate:
+                return name
+    return None
 
-    Binding tuples have shape `(type_str, value)` where `type_str` is one
-    of: 'special', 'vk', 'scan', 'char'.
 
-    Args:
-        event_key (Key | KeyCode | None): The key event to match.
-        binding (tuple[str, Any]): Parsed binding tuple.
+def _event_token(key: Key | KeyCode | None) -> str:
+    """Build a stable token so modifier state can survive release-order differences."""
+    if isinstance(key, Key):
+        return f"special:{getattr(key, 'name', str(key))}"
+    if isinstance(key, KeyCode):
+        return f"keycode:{getattr(key, 'vk', None)}:{getattr(key, 'char', None)!r}"
+    return repr(key)
 
-    Returns:
-        bool: True if the event matches the binding.
 
-    """
+def binding_matches(
+    event_key: Key | KeyCode | None,
+    binding: tuple[str, Any],
+    modifiers: frozenset[str] | set[str] | None = None,
+) -> bool:
+    """Return True if a key event and modifier set match a parsed binding."""
     if not isinstance(binding, tuple) or len(binding) != 2:  # noqa: PLR2004
         return False
 
     binding_type, binding_value = binding
+    active_modifiers = frozenset(modifiers or ())
+
+    if binding_type == "combo":
+        try:
+            expected_modifiers, base_binding = binding_value
+        except (TypeError, ValueError):
+            return False
+        return active_modifiers == frozenset(expected_modifiers) and binding_matches(
+            event_key=event_key,
+            binding=base_binding,
+            modifiers=frozenset(),
+        )
+
+    # Plain bindings are exact: Ctrl+F1 should not also trigger an F1 binding.
+    if active_modifiers:
+        return False
 
     if binding_type == "special":
         return event_key == binding_value
-
     if binding_type == "vk":
         return getattr(event_key, "vk", None) == binding_value
-
     if binding_type == "scan":
         return getattr(event_key, "scan", None) == binding_value
-
     if binding_type == "char":
         return _match_char(event_key, binding_value)
-
-    # final fallback
     return event_key == binding_value
 
 
@@ -131,23 +158,38 @@ class KeyboardListenerManager:
         blocks until the listener exits and returns None.
         """
 
+        pressed_modifiers: set[str] = set()
+        pressed_key_modifiers: dict[str, frozenset[str]] = {}
+        modifier_lock = Lock()
+
+        def _on_press(key: Key | KeyCode | None) -> None:
+            """Track modifiers and remember the modifier set present when a base key was pressed."""
+            modifier = _modifier_name(key)
+            with modifier_lock:
+                if modifier is not None:
+                    pressed_modifiers.add(modifier)
+                else:
+                    pressed_key_modifiers[_event_token(key)] = frozenset(pressed_modifiers)
+
         def _on_release(key: Key | KeyCode | None) -> bool:
-            """Wrap the module-level `on_release` used by the Listener.
+            """Wrap the module-level on_release and supply the matching modifier state."""
+            modifier = _modifier_name(key)
+            with modifier_lock:
+                if modifier is not None:
+                    pressed_modifiers.discard(modifier)
+                    event_modifiers = frozenset()
+                else:
+                    event_modifiers = pressed_key_modifiers.pop(
+                        _event_token(key),
+                        frozenset(pressed_modifiers),
+                    )
 
-            Args:
-                key (Key | KeyCode | None): The released key event supplied by pynput.
-
-            Returns:
-                bool: True to continue listening, False to stop.
-
-            """
-            should_continue = on_release(key=key)
+            should_continue = on_release(key=key, modifiers=event_modifiers)
             if not should_continue and on_stop is not None:
-                # Let on_stop exceptions propagate so they're visible to callers.
                 on_stop()
             return should_continue
 
-        listener = Listener(on_release=_on_release)  # type: ignore[arg-type]
+        listener = Listener(on_press=_on_press, on_release=_on_release)  # type: ignore[arg-type]
 
         with self._lock:
             self._listener = listener
@@ -242,6 +284,7 @@ def stop_listener() -> None:
 
 def on_release(  # noqa: C901, PLR0911, PLR0912, PLR0915
     key: Key | KeyCode | None,
+    modifiers: frozenset[str] | set[str] | None = None,
 ) -> bool:
     """Handle pynput key release events.
 
@@ -259,6 +302,8 @@ def on_release(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     if key is None:
         return True
+
+    active_modifiers = frozenset(modifiers or ())
 
     if not is_poe_game_window():
         return True
@@ -321,7 +366,7 @@ def on_release(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if (
             copyitem_key is not None
             and isinstance(key, (Key, KeyCode))
-            and binding_matches(event_key=key, binding=copyitem_key)
+            and binding_matches(event_key=key, binding=copyitem_key, modifiers=active_modifiers)
         ):
             logger.info("Attempting to extract price and currency type from hovered item.")
             # Former "advanced item copy" ctrl+alt+c is now standard on ctrl+c on both PoE1 and PoE2.
@@ -349,7 +394,7 @@ def on_release(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if (
             rightclick_key is not None
             and isinstance(key, (Key, KeyCode))
-            and binding_matches(event_key=key, binding=rightclick_key)
+            and binding_matches(event_key=key, binding=rightclick_key, modifiers=active_modifiers)
         ):
             logger.info("Attempting to open price dialog with right click.")
             # Right click to open price dialog
@@ -362,7 +407,7 @@ def on_release(  # noqa: C901, PLR0911, PLR0912, PLR0915
         elif (
             calcprice_key is not None
             and isinstance(key, (Key, KeyCode))
-            and binding_matches(event_key=key, binding=calcprice_key)
+            and binding_matches(event_key=key, binding=calcprice_key, modifiers=active_modifiers)
         ):
             logger.info("Attempting to calculate discounted price and update clipboard and price dialog.")
             # Copy (pre-selected) price to the clipboard
@@ -564,7 +609,7 @@ def on_release(  # noqa: C901, PLR0911, PLR0912, PLR0915
         elif (
             enter_key is not None
             and isinstance(key, (Key, KeyCode))
-            and binding_matches(event_key=key, binding=enter_key)
+            and binding_matches(event_key=key, binding=enter_key, modifiers=active_modifiers)
         ):
             if not enter_after_calcprice:
                 # Press enter to confirm new price
@@ -572,7 +617,7 @@ def on_release(  # noqa: C901, PLR0911, PLR0912, PLR0915
         elif (
             stop_key is not None
             and isinstance(key, (Key, KeyCode))
-            and binding_matches(event_key=key, binding=stop_key)
+            and binding_matches(event_key=key, binding=stop_key, modifiers=active_modifiers)
         ):
             logger.info("Stop key pressed, stopping listener.")
             return False
@@ -590,44 +635,58 @@ def on_release(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
 
 def keyorkeycode_from_str(key_str: str) -> tuple[str, Any]:
-    """Convert a string representation of a key to a pynput Key or KeyCode.
+    """Convert a hotkey string such as f3 or ctrl+1 into a parsed binding."""
+    key_str = key_str.strip().lower()
+    if not key_str:
+        raise ValueError("Key cannot be empty")
 
-    This is unfortunately necessary because pynput does not provide the from_char method for both.
+    if "+" in key_str:
+        parts = [part.strip() for part in key_str.split("+")]
+        if len(parts) < 2 or any(not part for part in parts):
+            raise ValueError(f"Invalid hotkey binding: {key_str}")
 
-    Args:
-        key_str (str): The string representation of the key, e.g. 'f3', 'a', etc.
+        modifier_aliases = {
+            "ctrl": "ctrl",
+            "control": "ctrl",
+            "alt": "alt",
+            "shift": "shift",
+            "win": "win",
+            "windows": "win",
+            "cmd": "win",
+            "meta": "win",
+        }
+        modifiers: set[str] = set()
+        for token in parts[:-1]:
+            modifier = modifier_aliases.get(token)
+            if modifier is None:
+                raise ValueError(f"Invalid hotkey modifier: {token}")
+            if modifier in modifiers:
+                raise ValueError(f"Duplicate hotkey modifier: {token}")
+            modifiers.add(modifier)
 
-    Returns:
-        Key | KeyCode: The corresponding Key or KeyCode object.
+        base_binding = keyorkeycode_from_str(parts[-1])
+        if base_binding[0] == "combo":
+            raise ValueError(f"Invalid nested hotkey binding: {key_str}")
+        if base_binding[0] == "special" and _modifier_name(base_binding[1]) is not None:
+            raise ValueError("A hotkey combination must end with a non-modifier key")
+        return ("combo", (frozenset(modifiers), base_binding))
 
-    """
-    key_str = key_str.strip()
-    # Support vk:<int> and scan:<int> formats for layout-independent bindings
+    # Support vk:<int> and scan:<int> formats for layout-independent bindings.
     if key_str.startswith("vk:"):
         try:
             return ("vk", int(key_str.split(":", 1)[1]))
         except (ValueError, TypeError) as e:
-            msg = f"Invalid vk binding: {key_str}"
-            raise ValueError(msg) from e
+            raise ValueError(f"Invalid vk binding: {key_str}") from e
     if key_str.startswith("scan:"):
         try:
             return ("scan", int(key_str.split(":", 1)[1]))
         except (ValueError, TypeError) as e:
-            msg = f"Invalid scan binding: {key_str}"
-            raise ValueError(msg) from e
+            raise ValueError(f"Invalid scan binding: {key_str}") from e
 
-    # Check if it's a special key in the Key enum
-    try:
-        special_key = getattr(Key, key_str.lower(), None)
-        if special_key is not None:
-            return ("special", special_key)
-    except AttributeError as e:
-        msg = f"Invalid key string: {key_str}"
-        raise ValueError(msg) from e
+    special_key = getattr(Key, key_str, None)
+    if special_key is not None:
+        return ("special", special_key)
 
-    # Otherwise, treat it as a regular character key
     if len(key_str) != 1:
-        msg = f"Invalid key string: {key_str}"
-        raise ValueError(msg)
-    # store char bindings as ('char', <single-char>)
+        raise ValueError(f"Invalid key string: {key_str}")
     return ("char", key_str)
