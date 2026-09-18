@@ -228,7 +228,7 @@ class Item:
                     if lvl_m:
                         requirements["level"] = int(lvl_m.group(1))
                     j += 1
-            elif low.startswith("note:"):
+            elif low.startswith(("note:", "메모:")):
                 note_text = line.split(":", 1)[1].strip()
                 # Attempt to extract price and currency from the note text
                 pattern = r"~\s*(?:b/o|price)\b[:\s]*([\d\.,\s]+)\s*([A-Za-z0-9]+(?:[-\s][A-Za-z0-9]+)*)"
