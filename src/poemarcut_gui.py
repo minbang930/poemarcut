@@ -19,6 +19,7 @@ from PyQt6.QtGui import (
     QFontDatabase,
     QIcon,
     QIntValidator,
+    QKeyEvent,
     QMoveEvent,
     QRegularExpressionValidator,
     QResizeEvent,
@@ -117,6 +118,86 @@ class _EmojiFormatter(logging.Formatter):
         # Swap levelname for symbol
         record.levelname = self.LEVEL_SYMBOLS.get(record.levelname, record.levelname)
         return super().format(record)
+
+
+def _hotkey_from_qt_key(key: int, modifiers: Qt.KeyboardModifier) -> str | None:
+    """Convert a Qt key press into the canonical hotkey string used by settings."""
+    modifier_keys = {
+        Qt.Key.Key_Control.value,
+        Qt.Key.Key_Alt.value,
+        Qt.Key.Key_Shift.value,
+        Qt.Key.Key_Meta.value,
+    }
+    if key in modifier_keys:
+        return None
+
+    parts: list[str] = []
+    if modifiers & Qt.KeyboardModifier.ControlModifier:
+        parts.append("ctrl")
+    if modifiers & Qt.KeyboardModifier.AltModifier:
+        parts.append("alt")
+    if modifiers & Qt.KeyboardModifier.ShiftModifier:
+        parts.append("shift")
+    if modifiers & Qt.KeyboardModifier.MetaModifier:
+        parts.append("win")
+
+    if Qt.Key.Key_0.value <= key <= Qt.Key.Key_9.value:
+        base = chr(key)
+    elif Qt.Key.Key_A.value <= key <= Qt.Key.Key_Z.value:
+        base = chr(key).lower()
+    elif Qt.Key.Key_F1.value <= key <= Qt.Key.Key_F35.value:
+        base = f"f{key - Qt.Key.Key_F1.value + 1}"
+    else:
+        special_keys = {
+            Qt.Key.Key_Return.value: "enter",
+            Qt.Key.Key_Enter.value: "enter",
+            Qt.Key.Key_Escape.value: "esc",
+            Qt.Key.Key_Space.value: "space",
+            Qt.Key.Key_Tab.value: "tab",
+            Qt.Key.Key_Backspace.value: "backspace",
+            Qt.Key.Key_Delete.value: "delete",
+            Qt.Key.Key_Insert.value: "insert",
+            Qt.Key.Key_Home.value: "home",
+            Qt.Key.Key_End.value: "end",
+            Qt.Key.Key_PageUp.value: "page_up",
+            Qt.Key.Key_PageDown.value: "page_down",
+            Qt.Key.Key_Left.value: "left",
+            Qt.Key.Key_Right.value: "right",
+            Qt.Key.Key_Up.value: "up",
+            Qt.Key.Key_Down.value: "down",
+        }
+        base = special_keys.get(key)
+
+    if base is None:
+        return None
+    return "+".join([*parts, base])
+
+
+class HotkeyCaptureLineEdit(QLineEdit):
+    """Read-only line edit that records the next physical hotkey pressed."""
+
+    hotkeyCaptured = pyqtSignal(str)
+
+    def __init__(self, value: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(value, parent)
+        self.setReadOnly(True)
+        self.setPlaceholderText("Press a hotkey")
+        self.setToolTip("Click this field, then press the desired key or key combination.")
+
+    def focusInEvent(self, event: QEvent | None) -> None:  # type: ignore[override]  # noqa: N802
+        super().focusInEvent(event)
+        self.selectAll()
+
+    def keyPressEvent(self, event: QKeyEvent | None) -> None:  # type: ignore[override]  # noqa: N802
+        if event is None:
+            return
+        hotkey = _hotkey_from_qt_key(event.key(), event.modifiers())
+        event.accept()
+        if hotkey is None:
+            return
+        self.setText(hotkey)
+        self.hotkeyCaptured.emit(hotkey)
+        self.selectAll()
 
 
 # PoE-like color scheme
@@ -448,7 +529,7 @@ class PoEMarcutGUI(QMainWindow):
 
         ## set up components for Keys settings fields
         keys_settings: settings.KeySettings = settings_man.settings.keys
-        keys_settings_header: QLabel = QLabel("Keys settings (press 'enter')")
+        keys_settings_header: QLabel = QLabel("Keys settings (click a field, then press a hotkey)")
         keys_settings_header.setStyleSheet(poe_header_style)
         leftthird_layout.addWidget(keys_settings_header, row_idx, 0, 1, 2)
         row_idx += 1
@@ -461,11 +542,8 @@ class PoEMarcutGUI(QMainWindow):
             setting_label: QLabel = QLabel(f"{field_name}:".replace("_", " "))
             setting_label.setToolTip(field_info.description or "")
 
-            lineedit: QLineEdit = QLineEdit(str(field_value))
-            self.key_validator = KeyOrKeyCodeValidator()
-            lineedit.setValidator(self.key_validator)
-            # update settings when the user finishes editing
-            lineedit.editingFinished.connect(partial(self.process_qle_text, "Keys", field_name, lineedit))
+            lineedit: HotkeyCaptureLineEdit = HotkeyCaptureLineEdit(str(field_value))
+            lineedit.hotkeyCaptured.connect(partial(self.process_qle_text, "Keys", field_name, lineedit))
             self.key_lineedits[field_name] = lineedit
 
             leftthird_layout.addWidget(setting_label, row_idx, 0)
