@@ -1,0 +1,91 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "assets/**"
+      - "pyproject.toml"
+      - "poetry.lock"
+      - ".github/workflows/windows-build.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "assets/**"
+      - "pyproject.toml"
+      - "poetry.lock"
+      - ".github/workflows/windows-build.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build on Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Poetry
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install poetry
+
+      - name: Install dependencies
+        shell: pwsh
+        run: poetry install --no-interaction --no-ansi
+
+      - name: Build Windows executable
+        shell: pwsh
+        run: poetry run build
+
+      - name: Verify build outputs
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist\poemarcut.exe")) {
+            throw "dist\poemarcut.exe was not created."
+          }
+          if (-not (Test-Path "dist\poemarcut.zip")) {
+            throw "dist\poemarcut.zip was not created."
+          }
+
+      - name: Write SHA-256 checksums
+        shell: pwsh
+        run: |
+          $exe = Get-FileHash "dist\poemarcut.exe" -Algorithm SHA256
+          $zip = Get-FileHash "dist\poemarcut.zip" -Algorithm SHA256
+          @(
+            "$($exe.Hash.ToLower())  poemarcut.exe"
+            "$($zip.Hash.ToLower())  poemarcut.zip"
+          ) | Set-Content -Path "dist\SHA256SUMS.txt" -Encoding ascii
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: poemarcut-windows-${{ github.sha }}
+          path: |
+            dist/poemarcut.exe
+            dist/poemarcut.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
