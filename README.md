@@ -39,6 +39,8 @@ Alternatively [run the source from the command line](https://github.com/cdrg/poe
 ## Settings
 Settings such as hotkeys, price adjustment percentage, leagues, etc can be edited in the GUI and are stored in `settings.yaml`.
 
+Hotkey fields capture physical key presses: click a field and press the desired key or combination. Single keys such as `F1`, letters, and numbers continue to work, and modifier combinations such as `Ctrl+1`, `Ctrl+3`, `Ctrl+Shift+F3`, `Alt+2`, and `Win+F4` are supported.
+
 `settings.yaml` is created with defaults if it doesn't exist at start.
 
 This plain-text file can be edited with any text editor and contains descriptions of each setting.
