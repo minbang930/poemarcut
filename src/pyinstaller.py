@@ -44,6 +44,7 @@ def install() -> None:
             path_to_main,
             "--onefile",
             "--noconsole",
+            "--name=poemarcut",
             "--workpath=" + str(PROJ_ROOT / "build"),
             "--distpath=" + str(PROJ_ROOT / "dist"),
             "--icon=" + str(PROJ_ROOT / "assets" / "icon.ico"),
